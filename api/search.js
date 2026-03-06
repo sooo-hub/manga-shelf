@@ -14,16 +14,14 @@ export default async function handler(req, res) {
 
   try {
     if (type === "bulk_check") {
-      // 複数作品の最新巻を一括チェック
-      const titles = query; // string[]
+      const titles = query;
       const results = await Promise.all(
         titles.map(async (title) => {
           try {
-            const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(title + " 漫画")}&langRestrict=ja&maxResults=40&orderBy=newest`;
+            const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(title)}&langRestrict=ja&maxResults=40&orderBy=newest`;
             const r = await fetch(url);
             const data = await r.json();
             const items = data.items || [];
-            // 巻数を抽出して最大値を取る
             let maxVol = 0;
             items.forEach(item => {
               const t = item.volumeInfo?.title || "";
@@ -39,32 +37,46 @@ export default async function handler(req, res) {
       return res.status(200).json({ results });
     }
 
-    // 通常の単一タイトル検索
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query + " 漫画 1巻")}&langRestrict=ja&maxResults=10`;
-    const r = await fetch(url);
-    const data = await r.json();
-    const items = data.items || [];
+    // 複数クエリパターンで検索
+    const queries = [
+      `intitle:${query}`,
+      `${query} コミック`,
+      `${query}`,
+    ];
 
-    // シリーズ候補をまとめる
     const seriesMap = {};
-    items.forEach(item => {
-      const info = item.volumeInfo || {};
-      const title = info.title || "";
-      // 「タイトル(N)」「タイトル N巻」などから基本タイトルを抽出
-      const baseTitle = title
-        .replace(/[（(]\d+[）)]/g, "")
-        .replace(/\s*\d+巻.*/, "")
-        .replace(/\s*Vol\.\s*\d+.*/i, "")
-        .trim();
-      if (!baseTitle || baseTitle.length < 2) return;
-      if (!seriesMap[baseTitle]) {
-        const author = (info.authors || []).join(", ");
-        const publisher = info.publisher || "";
-        const isbn = (info.industryIdentifiers || []).find(x => x.type === "ISBN_13")?.identifier || "";
-        const thumbnail = info.imageLinks?.thumbnail?.replace("http://", "https://") || "";
-        seriesMap[baseTitle] = { title: baseTitle, author, publisher, cover_url: thumbnail, isbn };
-      }
-    });
+
+    for (const q of queries) {
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&langRestrict=ja&maxResults=20`;
+      const r = await fetch(url);
+      const data = await r.json();
+      const items = data.items || [];
+
+      items.forEach(item => {
+        const info = item.volumeInfo || {};
+        const rawTitle = info.title || "";
+        const baseTitle = rawTitle
+          .replace(/[（(]\d+[）)]/g, "")
+          .replace(/\s*[\d]+巻.*/g, "")
+          .replace(/\s*Vol\.?\s*\d+.*/gi, "")
+          .replace(/\s*#\d+.*/gi, "")
+          .trim();
+        if (!baseTitle) return;
+        // クエリと関連するタイトルのみ採用
+        const q_lower = query.toLowerCase();
+        const t_lower = baseTitle.toLowerCase();
+        if (!t_lower.includes(q_lower) && !q_lower.includes(t_lower)) return;
+        if (!seriesMap[baseTitle]) {
+          const author = (info.authors || []).join(", ");
+          const publisher = info.publisher || "";
+          const thumbnail = (info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail || "")
+            .replace("http://", "https://");
+          seriesMap[baseTitle] = { title: baseTitle, author, publisher, cover_url: thumbnail };
+        }
+      });
+
+      if (Object.keys(seriesMap).length > 0) break;
+    }
 
     const series = Object.values(seriesMap).slice(0, 5);
     return res.status(200).json({ series });
