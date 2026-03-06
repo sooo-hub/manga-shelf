@@ -19,48 +19,34 @@ function getMissingVolumes(m) {
 }
 
 // ---------- API（Vercel経由でAnthropicを呼ぶ）----------
-async function callClaude(messages, useWebSearch = false) {
-  const res = await fetch("/api/claude", {
+
+// ---------- API（Google Books API・無料）----------
+async function searchMangaByTitle(query) {
+  const res = await fetch("/api/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, useWebSearch }),
+    body: JSON.stringify({ query, type: "search" }),
   });
   const data = await res.json();
-  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-  return text;
-}
-
-async function searchMangaByTitle(query) {
-  const text = await callClaude([{
-    role: "user",
-    content: `漫画「${query}」の書誌情報をJSON形式のみで返してください。説明文・コードブロック記号は不要。
-形式: {"series":[{"title":"タイトル","author":"著者名","publisher":"出版社","latest_volume":最新巻数字,"status":"連載中または完結","cover_isbn":"1巻ISBN13ハイフンなし"}]}
-複数シリーズあれば複数、なければ{"series":[]}`
-  }], true);
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return [];
-  try { return JSON.parse(m[0]).series || []; } catch { return []; }
+  return (data.series || []).map(s => ({ ...s, cover_url: s.cover_url || "" }));
 }
 
 async function checkLatestVolumes(mangaList) {
   const serializing = mangaList.filter(m => m.status === "連載中");
   if (!serializing.length) return {};
-  const titles = serializing.map(m => `「${m.title}」`).join("、");
-  const text = await callClaude([{
-    role: "user",
-    content: `以下の漫画の最新刊巻数をJSON形式のみで返してください。説明文不要。
-対象: ${titles}
-形式: {"results":[{"title":"タイトル","latest_volume":数字,"status":"連載中または完結"}]}
-不明はlatest_volume:0`
-  }], true);
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return {};
+  const res = await fetch("/api/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: serializing.map(m => m.title), type: "bulk_check" }),
+  });
+  const data = await res.json();
   try {
     const map = {};
-    (JSON.parse(m[0]).results || []).forEach(r => { if (r.title) map[r.title] = r; });
+    (data.results || []).forEach(r => { if (r.title) map[r.title] = r; });
     return map;
   } catch { return {}; }
 }
+
 
 async function fetchCoverFromOpenBD(isbn) {
   if (!isbn) return null;
@@ -179,12 +165,10 @@ function SearchModal({ onSelect, onClose }) {
     try {
       const series = await searchMangaByTitle(query.trim());
       setResults(series); setSearched(true);
-      series.forEach(async (s, i) => {
-        if (s.cover_isbn) {
-          const url = await fetchCoverFromOpenBD(s.cover_isbn);
-          if (url) setCovers(prev => ({ ...prev, [i]: url }));
-        }
-      });
+      // Google BooksのサムネイルをそのままCoversにセット
+      const newCovers = {};
+      series.forEach((s, i) => { if (s.cover_url) newCovers[i] = s.cover_url; });
+      setCovers(newCovers);
     } catch { setResults([]); setSearched(true); }
     setSearching(false);
   };
@@ -306,7 +290,7 @@ export default function App() {
   };
 
   const handleSelectFromSearch = (series, coverUrl) => {
-    setForm(f => ({ ...f, title: series.title || "", author: series.author || "", publisher: series.publisher || "", total: series.latest_volume || "", status: series.status || "", coverUrl: coverUrl || "" }));
+    setForm(f => ({ ...f, title: series.title || "", author: series.author || "", publisher: series.publisher || "", total: series.latest_volume || "", status: series.status || "", coverUrl: coverUrl || series.cover_url || "" }));
     setShowSearchModal(false);
     showToast(`「${series.title}」を選択しました`);
   };
